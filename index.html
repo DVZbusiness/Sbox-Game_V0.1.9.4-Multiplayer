@@ -1199,6 +1199,7 @@ const gameModesOverlay =
       mesh:group,
       vel:new THREE.Vector3(),
       type:'sign',
+      signText:window.sboxUltrakillSign===false?(window.sboxSignText||'SIGN'):'ULTRAKILL',
       width,
       height,
       thickness:0.04,
@@ -6798,7 +6799,10 @@ const gameModesOverlay =
   function serializeObject(o){
     if(!o?.mesh?.position)return null;
     if(o.type==='npc_nextbot'||o.type==='npc_cube'||o.type==='npc_cuboid')return null;
-    const d={type:o.type,position:o.mesh.position.toArray(),rotation:o.mesh.rotation.toArray(),scale:o.mesh.scale.toArray(),mass:o.mass,size:o.size,radius:o.radius,width:o.width,height:o.height,thickness:o.thickness,staticObject:!!o.staticObject,userData:o.userData||{}};
+    const d={type:o.type,position:o.mesh.position.toArray(),rotation:o.mesh.rotation.toArray(),scale:o.mesh.scale.toArray(),velocity:o.vel?.toArray?.()||[0,0,0],mass:o.mass,size:o.size,radius:o.radius,length:o.length,width:o.width,height:o.height,thickness:o.thickness,staticObject:!!o.staticObject,userData:o.userData||{}};
+    if(o.type==='sign') d.signText=window.sboxUltrakillSign===false?(window.sboxSignText||'SIGN'):'ULTRAKILL';
+    if(o.type==='solarsystem') d.special='solarsystem';
+    if(o.type==='blackhole') d.special='blackhole';
     if(o.mesh.material?.color)d.color=o.mesh.material.color.getHex();
     if(o.type==='catalyst')d.catalystMode=o.catalystMode;
     if(o.type==='glass')d.glass=true;
@@ -6823,13 +6827,15 @@ const gameModesOverlay =
         else if(d.type==='sphere')o=spawnSphere(p,d.radius||.6,d.mass||1.5);
         else if(d.type==='wall')o=spawnWall(p,d.width||5,d.height||2,d.thickness||.2);
         else if(d.type==='glass')o=spawnGlassPanel(p,d.width||5,d.height||2,d.thickness||.16);
-        else if(d.type==='sign')o=spawnSign(p,d.width||1.2,d.height||.6);
+        else if(d.type==='sign'){const oldText=window.sboxSignText,oldUltra=window.sboxUltrakillSign;window.sboxUltrakillSign=false;window.sboxSignText=d.signText||'SIGN';o=spawnSign(p,d.width||1.2,d.height||.6);window.sboxSignText=oldText;window.sboxUltrakillSign=oldUltra;o.signText=d.signText||'SIGN';}
         else if(d.type==='octa')o=spawnOctahedron(p,d.size||.6);
         else if(d.type==='newOcta')o=spawnNewOctahedron(p,d.size||1.35);
         else if(d.type==='light')o=spawnLight(p);
-        else if(d.type==='pill')o=spawnPill(p);
+        else if(d.type==='pill')o=spawnPill(p,d.length||0.8,d.radius||0.18,d.mass||0.5,new THREE.Vector3().fromArray(d.velocity||[0,0,0]));
+        else if(d.type==='blackhole') { spawnBlackHole(p); o=blackHole; }
+        else if(d.type==='solarsystem') { spawnSolarSystem(p); o=solarSystem; }
         else if(d.type==='catalyst')o=createCatalyst(d.catalystMode||'day',p); else if(d.type==='octa_prison')o=spawnPrisonAt(p);
-        if(o){if(o.type==='octa_prison')o.hitCount=d.hitCount||0;o.staticObject=!!d.staticObject;o.mesh.rotation.fromArray(d.rotation||[0,0,0,'XYZ']);o.mesh.scale.fromArray(d.scale||[1,1,1]);}
+        if(o){if(o.type==='octa_prison')o.hitCount=d.hitCount||0;o.staticObject=!!d.staticObject;o.mesh.rotation.fromArray(d.rotation||[0,0,0,'XYZ']);o.mesh.scale.fromArray(d.scale||[1,1,1]);if(o.vel?.fromArray)o.vel.fromArray(d.velocity||[0,0,0]);if(o.type==='sign')o.signText=d.signText||'SIGN';}
       });
       (data.npcs||[]).forEach(n=>{const q=new THREE.Vector3().fromArray(n.position||camera.position.toArray());if(n.type==='npc_nextbot'){const old=nextbotImage;nextbotImage=n.imageData||null;spawnFriendlyNextbot();nextbotImage=old;npcs[npcs.length-1].mesh.position.copy(q);}else if(n.type==='npc_cube'||n.type==='npc_cuboid'){const old=n.type==='npc_cube'?npcCubeImage:npcCuboidImage;if(n.type==='npc_cube')npcCubeImage=n.imageData||null;else npcCuboidImage=n.imageData||null;spawnImageNpc(n.type,n.mode||'follow',n.imageData||null);npcs[npcs.length-1].mesh.position.copy(q);if(n.type==='npc_cube')npcCubeImage=old;else npcCuboidImage=old;}});
       if(data.catalystMode)applyCatalystMode(data.catalystMode);else{catalystMode=null;updateCatalystStatus();}showToast('World synchronized');
@@ -7566,11 +7572,11 @@ const gameModesOverlay =
       rainOn:typeof rainOn==='undefined'?false:rainOn,
       catalystMode:typeof catalystMode==='undefined'?null:catalystMode,
       objects:objects.map(o=>window.__sboxSerializeObject ? window.__sboxSerializeObject(o) : null).filter(Boolean),
-      npcs:(window.__sboxGetNPCs ? window.__sboxGetNPCs() : []).map(n=>({type:n.type,mode:n.mode||'follow',imageData:n.imageData||null,position:n.mesh.position.toArray()}))
+      npcs:(window.__sboxGetNPCs ? window.__sboxGetNPCs() : []).map(n=>({type:n.type,mode:n.mode||'follow',imageData:null,position:n.mesh.position.toArray()}))
     };
   }
   function structureKey(data) {
-    return JSON.stringify({objects:(data.objects||[]).map(o=>[o.type, o.userData?.imageData?1:0]),npcs:(data.npcs||[]).map(n=>n.type)});
+    return JSON.stringify({objects:(data.objects||[]).map(o=>[o.type,o.signText||'',o.special||'',o.userData?.imageData?1:0]),npcs:(data.npcs||[]).map(n=>[n.type,n.mode||'follow'])});
   }
   async function applyWorld(data) {
     if(!data || !Array.isArray(data.objects)) return;
@@ -7594,7 +7600,7 @@ const gameModesOverlay =
           if(d.position)o.mesh.position.fromArray(d.position);
           if(d.rotation)o.mesh.rotation.fromArray(d.rotation);
           if(d.scale)o.mesh.scale.fromArray(d.scale);
-          if(o.vel?.set) o.vel.set(0,0,0);
+          if(o.vel?.fromArray && d.velocity) o.vel.fromArray(d.velocity);
         });
         lastWorldReceived=key;
       }
@@ -7630,7 +7636,10 @@ const gameModesOverlay =
     if(msg.type==='world' && hostMode && msg.data) {
       // Guest structural edits are accepted as a proposal; the host remains the source of truth afterward.
       const key=structureKey(msg.data);
-      if(key!==structureKey(worldData())) {
+      const local=worldData();
+      const incomingKey=JSON.stringify(msg.data.objects.map(o=>[o.type,o.position,o.rotation,o.velocity,o.signText,o.special]).concat((msg.data.npcs||[]).map(n=>[n.type,n.position])));
+      const localFullKey=JSON.stringify(local.objects.map(o=>[o.type,o.position,o.rotation,o.velocity,o.signText,o.special]).concat((local.npcs||[]).map(n=>[n.type,n.position])));
+      if(incomingKey!==localFullKey) {
         applyWorld(msg.data).then(()=>broadcast({type:'world',data:worldData()})).catch(console.error);
       }
       return;
@@ -7743,10 +7752,10 @@ const gameModesOverlay =
         lastWorldSend=now;
       } else if(!hostMode && connections.size) {
         const data=worldData(), key=structureKey(data);
-        if(key!==previousStructure) {
+        if(key!==previousStructure && now-lastWorldSend>250) {
           const hostConn=[...connections.values()][0];
           if(hostConn) send(hostConn,{type:'world',data});
-          previousStructure=key;
+          previousStructure=key; lastWorldSend=now;
         }
       }
     }
