@@ -7497,6 +7497,7 @@ const gameModesOverlay =
   const statusEl = $('smp-status'), codeEl = $('smp-code'), playersEl = $('smp-players');
   let peer = null, hostMode = false, roomCode = '', connections = new Map(), remotes = new Map();
   let lastWorldStructure = '', lastWorldSend = 0, lastPoseSend = 0, lastWorldReceived = '';
+  const playerPoses = new Map();
   const MAX_PEERS = 7; // Seven guests + the host = eight total.
   const PEER_OPTIONS = {debug: 2, config: {iceServers: [
     {urls: 'stun:stun.l.google.com:19302'},
@@ -7587,14 +7588,15 @@ const gameModesOverlay =
     if(msg.type==='full') { status('That room is full (8 players maximum).'); return; }
     if(msg.type==='hello') {
       if(!hostMode) return;
-      send(conn,{type:'welcome',room:roomCode,hostPose:sendPose(),world:worldData()});
+      send(conn,{type:'welcome',room:roomCode,hostPose:sendPose(),players:[...playerPoses.entries()].filter(([id])=>id!==conn.peer).map(([id,pose])=>({id,pose,name:'Player'})),world:worldData()});
       return;
     }
     if(msg.type==='pose') {
-      let avatar=remotes.get(conn.peer); if(!avatar) avatar=makeAvatar(conn.peer,msg.name||'Player');
+      playerPoses.set(conn.peer,msg);
+      let avatar=remotes.get(conn.peer); if(!avatar) avatar=makeAvatar(conn.peer,msg.name||(conn.peer===('sbox-'+roomCode.toLowerCase())?'Host':'Player'));
       if(Array.isArray(msg.position)) avatar.position.fromArray(msg.position);
       if(Array.isArray(msg.rotation)) avatar.rotation.set(msg.rotation[0]||0,msg.rotation[1]||0,msg.rotation[2]||0);
-      if(hostMode) broadcast(msg, conn.peer); // Relay guest poses so all players can see one another.
+      if(hostMode) broadcast(msg, conn.peer); // Host relays guest poses to every other guest.
       return;
     }
     if(msg.type==='world' && hostMode && msg.data) {
@@ -7607,7 +7609,27 @@ const gameModesOverlay =
     }
     if(msg.type==='welcome' && !hostMode) {
       status(`Connected to room ${roomCode}`,true);
-      if(msg.world) applyWorld(msg.world).catch(console.error);
+      // The host's welcome packet includes its current pose so it is visible immediately,
+      // without waiting for the next periodic pose broadcast.
+      if(msg.hostPose) {
+        let hostAvatar=remotes.get(conn.peer);
+        if(!hostAvatar) hostAvatar=makeAvatar(conn.peer,'Host');
+        if(Array.isArray(msg.hostPose.position)) hostAvatar.position.fromArray(msg.hostPose.position);
+        if(Array.isArray(msg.hostPose.rotation)) hostAvatar.rotation.set(msg.hostPose.rotation[0]||0,msg.hostPose.rotation[1]||0,msg.hostPose.rotation[2]||0);
+        playerPoses.set(conn.peer,msg.hostPose);
+      }
+      // Also seed this joining player with the other players already in the room.
+      if(Array.isArray(msg.players)) for(const p of msg.players) {
+        if(!p || !p.id || !p.pose) continue;
+        let avatar=remotes.get(p.id);
+        if(!avatar) avatar=makeAvatar(p.id,p.name||'Player');
+        if(Array.isArray(p.pose.position)) avatar.position.fromArray(p.pose.position);
+        if(Array.isArray(p.pose.rotation)) avatar.rotation.set(p.pose.rotation[0]||0,p.pose.rotation[1]||0,p.pose.rotation[2]||0);
+        playerPoses.set(p.id,p.pose);
+      }
+      if(msg.world) { applyWorld(msg.world).then(()=>{ previousStructure=structureKey(worldData()); }).catch(console.error); }
+      // Send our pose immediately; don't wait for the animation-frame tick.
+      send(conn,{type:'pose',...sendPose(),name:'Player'});
       return;
     }
     if(msg.type==='world' && !hostMode && msg.data) {
@@ -7627,7 +7649,6 @@ const gameModesOverlay =
       connections.set(conn.peer,conn); updatePlayers(); setButtons(true);
       if(hostMode) {
         makeAvatar(conn.peer,'Player');
-        send(conn,{type:'welcome',room:roomCode,hostPose:sendPose(),world:worldData()});
       } else send(conn,{type:'hello',name:'Player'});
       status(hostMode?`Hosting ${roomCode}`:`Connecting to ${roomCode}…`,true);
     });
@@ -7637,7 +7658,7 @@ const gameModesOverlay =
   }
   function cleanup() {
     for(const c of connections.values())try{c.close();}catch{}
-    connections.clear(); for(const id of [...remotes.keys()])removeRemote(id);
+    connections.clear(); playerPoses.clear(); for(const id of [...remotes.keys()])removeRemote(id);
     try{peer?.destroy();}catch{} peer=null; hostMode=false; roomCode='';
     setButtons(false);updatePlayers();status('Not connected');
   }
@@ -7678,10 +7699,10 @@ const gameModesOverlay =
 
   let previousStructure='';
   function multiplayerTick(now) {
-    if(peer && peer.open) {
-      if(now-lastPoseSend>100) {
-        const pose=sendPose();
-        broadcast({type:'pose',...pose}, null);
+    if(peer && !peer.destroyed) {
+      if(now-lastPoseSend>100 && connections.size) {
+        const pose={type:'pose',...sendPose(),name:hostMode?'Host':'Player'};
+        broadcast(pose, null);
         lastPoseSend=now;
       }
       if(hostMode && now-lastWorldSend>500) {
