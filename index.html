@@ -7497,6 +7497,8 @@ const gameModesOverlay =
   const statusEl = $('smp-status'), codeEl = $('smp-code'), playersEl = $('smp-players');
   let peer = null, hostMode = false, roomCode = '', connections = new Map(), remotes = new Map();
   let lastWorldStructure = '', lastWorldSend = 0, lastPoseSend = 0, lastWorldReceived = '';
+  let applyingWorldPromise = Promise.resolve();
+  let worldApplyQueued = null;
   const playerPoses = new Map();
   const MAX_PEERS = 7; // Seven guests + the host = eight total.
   const PEER_OPTIONS = {debug: 2, config: {iceServers: [
@@ -7562,22 +7564,32 @@ const gameModesOverlay =
   }
   async function applyWorld(data) {
     if(!data || !Array.isArray(data.objects)) return;
-    const key=structureKey(data);
-    const localCam={position:camera.position.toArray(),rotation:camera.rotation.toArray()};
-    if(key!==structureKey(worldData())) {
-      data.camera=localCam; // Never teleport a joining player to the host camera.
-      const file = new File([JSON.stringify(data)], 'multiplayer-sync.json', {type:'application/json'});
-      await loadWorldFile(file);
-    } else {
-      data.objects.forEach((d,i)=>{
-        const o=objects[i]; if(!o?.mesh || o.type!==d.type) return;
-        if(d.position)o.mesh.position.fromArray(d.position);
-        if(d.rotation)o.mesh.rotation.fromArray(d.rotation);
-        if(d.scale)o.mesh.scale.fromArray(d.scale);
-        if(o.vel?.set) o.vel.set(0,0,0);
-      });
-    }
-    lastWorldReceived=key;
+    // Serialize snapshot application so rapid host broadcasts cannot overlap world rebuilds.
+    worldApplyQueued = data;
+    applyingWorldPromise = applyingWorldPromise.then(async () => {
+      while (worldApplyQueued) {
+        const snapshot = worldApplyQueued; worldApplyQueued = null;
+        if(!snapshot || !Array.isArray(snapshot.objects)) continue;
+        const key = structureKey(snapshot);
+        const localCam={position:camera.position.toArray(),rotation:camera.rotation.toArray()};
+        const localKey = structureKey(worldData());
+        if(key!==localKey) {
+          const safeSnapshot = {...snapshot, camera:localCam}; // Preserve this player's own view.
+          const file = new File([JSON.stringify(safeSnapshot)], 'multiplayer-sync.json', {type:'application/json'});
+          await loadWorldFile(file);
+        }
+        // Always apply transforms by index after any rebuild; this also keeps moving objects in sync.
+        snapshot.objects.forEach((d,i)=>{
+          const o=objects[i]; if(!o?.mesh || o.type!==d.type) return;
+          if(d.position)o.mesh.position.fromArray(d.position);
+          if(d.rotation)o.mesh.rotation.fromArray(d.rotation);
+          if(d.scale)o.mesh.scale.fromArray(d.scale);
+          if(o.vel?.set) o.vel.set(0,0,0);
+        });
+        lastWorldReceived=key;
+      }
+    }).catch(e=>{ console.error('World snapshot apply failed',e); status('World sync failed — see browser console.'); });
+    return applyingWorldPromise;
   }
   function sendPose() {
     const direction=new THREE.Vector3(); camera.getWorldDirection(direction);
@@ -7588,15 +7600,21 @@ const gameModesOverlay =
     if(msg.type==='full') { status('That room is full (8 players maximum).'); return; }
     if(msg.type==='hello') {
       if(!hostMode) return;
-      send(conn,{type:'welcome',room:roomCode,hostPose:sendPose(),players:[...playerPoses.entries()].filter(([id])=>id!==conn.peer).map(([id,pose])=>({id,pose,name:'Player'})),world:worldData()});
+      send(conn,{type:'welcome',room:roomCode,hostId:peer?.id||('sbox-'+roomCode.toLowerCase()),hostPose:sendPose(),players:[...playerPoses.entries()].filter(([id])=>id!==conn.peer).map(([id,pose])=>({id,pose,name:'Player'})),world:worldData()});
       return;
     }
     if(msg.type==='pose') {
+      if(!Array.isArray(msg.position) || msg.position.length < 3) return;
       playerPoses.set(conn.peer,msg);
-      let avatar=remotes.get(conn.peer); if(!avatar) avatar=makeAvatar(conn.peer,msg.name||(conn.peer===('sbox-'+roomCode.toLowerCase())?'Host':'Player'));
-      if(Array.isArray(msg.position)) avatar.position.fromArray(msg.position);
-      if(Array.isArray(msg.rotation)) avatar.rotation.set(msg.rotation[0]||0,msg.rotation[1]||0,msg.rotation[2]||0);
-      if(hostMode) broadcast(msg, conn.peer); // Host relays guest poses to every other guest.
+      let avatar=remotes.get(conn.peer);
+      if(!avatar) avatar=makeAvatar(conn.peer,msg.name||(hostMode?'Player':'Host'));
+      avatar.visible = true;
+      avatar.position.set(Number(msg.position[0])||0,Number(msg.position[1])||0,Number(msg.position[2])||0);
+      if(Array.isArray(msg.rotation)) avatar.rotation.set(Number(msg.rotation[0])||0,Number(msg.rotation[1])||0,Number(msg.rotation[2])||0);
+      if(hostMode) {
+        // Relay each guest's latest pose to all other guests; the host is the room's relay.
+        for(const [id, other] of connections) if(id!==conn.peer) send(other,msg);
+      }
       return;
     }
     if(msg.type==='world' && hostMode && msg.data) {
@@ -7701,8 +7719,8 @@ const gameModesOverlay =
   function multiplayerTick(now) {
     if(peer && !peer.destroyed) {
       if(now-lastPoseSend>100 && connections.size) {
-        const pose={type:'pose',...sendPose(),name:hostMode?'Host':'Player'};
-        broadcast(pose, null);
+        const pose={type:'pose',...sendPose(),name:hostMode?'Host':'Player',sentAt:now};
+        for (const conn of connections.values()) send(conn,pose);
         lastPoseSend=now;
       }
       if(hostMode && now-lastWorldSend>500) {
