@@ -3353,9 +3353,8 @@ const gameModesOverlay =
 
     else if(o.type==='sign'){
 
-      data.sign = {
-        text:'ULTRAKILL'
-      };
+      data.sign = { text:o.signText || 'SIGN' };
+      data.signText = o.signText || 'SIGN';
     }
 
 
@@ -6800,7 +6799,7 @@ const gameModesOverlay =
     if(!o?.mesh?.position)return null;
     if(o.type==='npc_nextbot'||o.type==='npc_cube'||o.type==='npc_cuboid')return null;
     const d={type:o.type,position:o.mesh.position.toArray(),rotation:o.mesh.rotation.toArray(),scale:o.mesh.scale.toArray(),velocity:o.vel?.toArray?.()||[0,0,0],mass:o.mass,size:o.size,radius:o.radius,length:o.length,width:o.width,height:o.height,thickness:o.thickness,staticObject:!!o.staticObject,userData:o.userData||{}};
-    if(o.type==='sign') d.signText=window.sboxUltrakillSign===false?(window.sboxSignText||'SIGN'):'ULTRAKILL';
+    if(o.type==='sign') d.signText=o.signText || 'SIGN';
     if(o.type==='solarsystem') d.special='solarsystem';
     if(o.type==='blackhole') d.special='blackhole';
     if(o.mesh.material?.color)d.color=o.mesh.material.color.getHex();
@@ -6818,7 +6817,7 @@ const gameModesOverlay =
       for(let i=objects.length-1;i>=0;i--){const o=objects[i];if(o.mesh?.parent===scene){scene.remove(o.mesh);objects.splice(i,1);}}
       // Loading a save replaces the whole sandbox, including NPCs from the previous save.
       for(const n of npcs.splice(0,npcs.length)){if(n.mesh?.parent)scene.remove(n.mesh);}
-      catalystObjects=[];prisonExists=false;staticAnchors.clear();
+      catalystObjects=[];prisonExists=false;staticAnchors.clear();blackHole=null;solarSystem=null;
       if(data.camera){camera.position.fromArray(data.camera.position);camera.rotation.fromArray(data.camera.rotation);}
       isDay=data.isDay!==false;dayTimer=data.dayTimer||0;if(data.rainOn)rainOn=true;else clearRain();
       (data.objects||[]).forEach(d=>{
@@ -7572,11 +7571,12 @@ const gameModesOverlay =
       rainOn:typeof rainOn==='undefined'?false:rainOn,
       catalystMode:typeof catalystMode==='undefined'?null:catalystMode,
       objects:objects.map(o=>window.__sboxSerializeObject ? window.__sboxSerializeObject(o) : null).filter(Boolean),
-      npcs:(window.__sboxGetNPCs ? window.__sboxGetNPCs() : []).map(n=>({type:n.type,mode:n.mode||'follow',imageData:null,position:n.mesh.position.toArray()}))
+      movingPlatforms:(()=>{const mp=window.__sboxMovingPlatforms;if(!mp)return [];return [...mp.pointPairs.values()].map(p=>({id:p.id,start:p.start?{position:p.start.position.toArray(),rotation:p.start.rotation.y||0}:null,end:p.end?{position:p.end.position.toArray(),rotation:p.end.rotation.y||0}:null,platform:p.platform?{position:p.platform.mesh.position.toArray(),rotation:p.platform.mesh.rotation.y||0,dir:p.platform.dir,waitTimer:p.platform.waitTimer,enabled:p.platform.enabled,speed:p.platform.speed,wait:p.platform.wait,color:p.platform.mesh.material?.color?.getHex?.()??0x6688aa}:null}));})(),
+      npcs:(window.__sboxGetNPCs ? window.__sboxGetNPCs() : []).map(n=>({type:n.type,mode:n.mode||'follow',imageData:null,position:n.mesh.position.toArray(),color:n.mesh.children?.[0]?.material?.color?.getHex?.()??0xffffff,owner:window.__sboxPeerId||'local'}))
     };
   }
   function structureKey(data) {
-    return JSON.stringify({objects:(data.objects||[]).map(o=>[o.type,o.signText||'',o.special||'',o.userData?.imageData?1:0]),npcs:(data.npcs||[]).map(n=>[n.type,n.mode||'follow'])});
+    return JSON.stringify({objects:(data.objects||[]).map(o=>[o.type,o.signText||'',o.special||'',o.userData?.imageData?1:0]),npcs:(data.npcs||[]).map(n=>[n.type,n.mode||'follow']),movingPlatforms:(data.movingPlatforms||[]).map(p=>[p.id,!!p.start,!!p.end,!!p.platform])});
   }
   async function applyWorld(data) {
     if(!data || !Array.isArray(data.objects)) return;
@@ -7594,12 +7594,27 @@ const gameModesOverlay =
           if (typeof window.__sboxLoadWorldData !== 'function') throw new Error('World loader bridge is unavailable');
           await window.__sboxLoadWorldData(safeSnapshot);
         }
+        // Rebuild moving-platform endpoint pairs from the authoritative snapshot.
+        const mp=window.__sboxMovingPlatforms;
+        if(mp && Array.isArray(snapshot.movingPlatforms)) {
+          const THREERef=window.THREE;
+          for(const pair of mp.pointPairs.values()) { if(pair.start?.parent)scene.remove(pair.start); if(pair.end?.parent)scene.remove(pair.end); if(pair.platform?.mesh?.parent)scene.remove(pair.platform.mesh); }
+          mp.pointPairs.clear(); mp.platforms.splice(0,mp.platforms.length);
+          for(const d of snapshot.movingPlatforms) {
+            const pair={id:d.id,start:null,end:null,platform:null};
+            if(d.start){pair.start=new THREERef.Mesh(new THREERef.SphereGeometry(.24,12,8),new THREERef.MeshStandardMaterial({color:0x44cc88}));pair.start.position.fromArray(d.start.position);pair.start.rotation.y=d.start.rotation||0;pair.start.userData.mpPoint={id:d.id,type:'start',name:'Startpoint'+d.id};scene.add(pair.start);}
+            if(d.end){pair.end=new THREERef.Mesh(new THREERef.SphereGeometry(.24,12,8),new THREERef.MeshStandardMaterial({color:0xddaa44}));pair.end.position.fromArray(d.end.position);pair.end.rotation.y=d.end.rotation||0;pair.end.userData.mpPoint={id:d.id,type:'end',name:'Endpoint'+d.id};scene.add(pair.end);}
+            if(d.platform && pair.start && pair.end){const mesh=new THREERef.Mesh(new THREERef.BoxGeometry(3.5,.35,2.2),new THREERef.MeshStandardMaterial({color:d.platform.color??0x6688aa}));mesh.position.fromArray(d.platform.position||d.start.position);mesh.rotation.y=d.platform.rotation||0;scene.add(mesh);pair.platform={mesh,start:pair.start,end:pair.end,speed:d.platform.speed||2,wait:d.platform.wait||1,dir:d.platform.dir||1,waitTimer:d.platform.waitTimer||0,enabled:d.platform.enabled!==false,motionDelta:new THREERef.Vector3()};mp.platforms.push(pair.platform);}
+            mp.pointPairs.set(d.id,pair);
+          }
+        }
         // Always apply transforms by index after any rebuild; this also keeps moving objects in sync.
         snapshot.objects.forEach((d,i)=>{
           const o=objects[i]; if(!o?.mesh || o.type!==d.type) return;
           if(d.position)o.mesh.position.fromArray(d.position);
           if(d.rotation)o.mesh.rotation.fromArray(d.rotation);
           if(d.scale)o.mesh.scale.fromArray(d.scale);
+          if(o.type==='sign' && d.signText){o.signText=d.signText;}
           if(o.vel?.fromArray && d.velocity) o.vel.fromArray(d.velocity);
         });
         lastWorldReceived=key;
