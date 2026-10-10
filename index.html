@@ -6201,7 +6201,7 @@ const gameModesOverlay =
        RAIN
     ============================================================ */
 
-    resolvePillStaticCollisions();
+    if (typeof window.__sboxResolvePillStaticCollisions === 'function') window.__sboxResolvePillStaticCollisions();
     updateRain(dt);
 
 
@@ -6805,6 +6805,8 @@ const gameModesOverlay =
     if(o.type==='octa_prison'){d.prison=true;d.hitCount=o.hitCount||0;}
     return d;
   }
+  // Public, narrow bridge for the separately-scoped multiplayer add-on.
+  window.__sboxSerializeObject = serializeObject;
   async function loadWorldFile(file){
     try{const data=JSON.parse(await file.text());
       for(let i=objects.length-1;i>=0;i--){const o=objects[i];if(o.mesh?.parent===scene){scene.remove(o.mesh);objects.splice(i,1);}}
@@ -7189,6 +7191,11 @@ const gameModesOverlay =
     if(catalystMode){ applyCatalystMode(catalystMode); }
   }
 
+  window.__sboxLoadWorldData = async function(data){
+    const safeData = {...data, camera: undefined};
+    const file = new File([JSON.stringify(safeData)], 'multiplayer-sync.json', {type:'application/json'});
+    await loadWorldFile(file);
+  };
   function tick(){const now=performance.now(),dt=Math.min(.05,(now-last)/1000);last=now;updateNPCs(dt);checkCatalystHits();if(worldRainInput)worldRainInput.checked=rainOn;if(worldCustomTime)applyWorldTime();if(!worldNormalCycle&&!worldCustomTime)dayTimer=0;scene.background=new THREE.Color(worldSkyColor);applyWorldRainVisual();rememberStatics();restoreStatics();sboxFinalFixes(dt);requestAnimationFrame(tick);}tick();
 })();
 
@@ -7215,6 +7222,7 @@ const gameModesOverlay =
       }
     }
   }
+  window.__sboxResolvePillStaticCollisions = resolvePillStaticCollisions;
 
 </script>
 
@@ -7555,7 +7563,7 @@ const gameModesOverlay =
       dayTimer:typeof dayTimer==='undefined'?0:dayTimer,
       rainOn:typeof rainOn==='undefined'?false:rainOn,
       catalystMode:typeof catalystMode==='undefined'?null:catalystMode,
-      objects:objects.map(serializeObject).filter(Boolean),
+      objects:objects.map(o=>window.__sboxSerializeObject ? window.__sboxSerializeObject(o) : null).filter(Boolean),
       npcs:npcs.map(n=>({type:n.type,mode:n.mode||'follow',imageData:n.imageData||null,position:n.mesh.position.toArray()}))
     };
   }
@@ -7575,8 +7583,8 @@ const gameModesOverlay =
         const localKey = structureKey(worldData());
         if(key!==localKey) {
           const safeSnapshot = {...snapshot, camera:localCam}; // Preserve this player's own view.
-          const file = new File([JSON.stringify(safeSnapshot)], 'multiplayer-sync.json', {type:'application/json'});
-          await loadWorldFile(file);
+          if (typeof window.__sboxLoadWorldData !== 'function') throw new Error('World loader bridge is unavailable');
+          await window.__sboxLoadWorldData(safeSnapshot);
         }
         // Always apply transforms by index after any rebuild; this also keeps moving objects in sync.
         snapshot.objects.forEach((d,i)=>{
@@ -7728,11 +7736,11 @@ const gameModesOverlay =
         lastWorldSend=now;
       } else if(!hostMode && connections.size) {
         const data=worldData(), key=structureKey(data);
-        if(key!==previousStructure && previousStructure) {
+        if(key!==previousStructure) {
           const hostConn=[...connections.values()][0];
-          send(hostConn,{type:'world',data});
+          if(hostConn) send(hostConn,{type:'world',data});
+          previousStructure=key;
         }
-        previousStructure=key;
       }
     }
     requestAnimationFrame(multiplayerTick);
