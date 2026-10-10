@@ -6807,6 +6807,8 @@ const gameModesOverlay =
   }
   // Public, narrow bridge for the separately-scoped multiplayer add-on.
   window.__sboxSerializeObject = serializeObject;
+  // Expose NPCs safely to the separately-scoped multiplayer add-on.
+  window.__sboxGetNPCs = () => npcs;
   async function loadWorldFile(file){
     try{const data=JSON.parse(await file.text());
       for(let i=objects.length-1;i>=0;i--){const o=objects[i];if(o.mesh?.parent===scene){scene.remove(o.mesh);objects.splice(i,1);}}
@@ -7564,7 +7566,7 @@ const gameModesOverlay =
       rainOn:typeof rainOn==='undefined'?false:rainOn,
       catalystMode:typeof catalystMode==='undefined'?null:catalystMode,
       objects:objects.map(o=>window.__sboxSerializeObject ? window.__sboxSerializeObject(o) : null).filter(Boolean),
-      npcs:npcs.map(n=>({type:n.type,mode:n.mode||'follow',imageData:n.imageData||null,position:n.mesh.position.toArray()}))
+      npcs:(window.__sboxGetNPCs ? window.__sboxGetNPCs() : []).map(n=>({type:n.type,mode:n.mode||'follow',imageData:n.imageData||null,position:n.mesh.position.toArray()}))
     };
   }
   function structureKey(data) {
@@ -7634,6 +7636,7 @@ const gameModesOverlay =
       return;
     }
     if(msg.type==='welcome' && !hostMode) {
+      conn.__sboxHandshakeComplete = true;
       status(`Connected to room ${roomCode}`,true);
       // The host's welcome packet includes its current pose so it is visible immediately,
       // without waiting for the next periodic pose broadcast.
@@ -7665,10 +7668,14 @@ const gameModesOverlay =
   function attachConnection(conn, incoming=false) {
     let connectionTimer = setTimeout(() => {
       if (!conn.open) {
-        status('Connection timed out. Keep the host online and try again; some networks need a TURN relay.', false);
+        status('Connection timed out before the data channel opened. Keep the host online and try again; some networks need a TURN relay.', false);
+        try { conn.close(); } catch {}
+      } else if (!hostMode && !conn.__sboxHandshakeComplete) {
+        status('Connected to peer, but no host welcome arrived. Reload both pages and create a new room.', false);
         try { conn.close(); } catch {}
       }
     }, 18000);
+    let handshakeComplete = false;
     conn.on('open',()=>{
       clearTimeout(connectionTimer);
       if(hostMode && connections.size>=MAX_PEERS){send(conn,{type:'full'});conn.close();return;}
@@ -7676,7 +7683,7 @@ const gameModesOverlay =
       if(hostMode) {
         makeAvatar(conn.peer,'Player');
       } else send(conn,{type:'hello',name:'Player'});
-      status(hostMode?`Hosting ${roomCode}`:`Connecting to ${roomCode}…`,true);
+      status(hostMode?`Hosting ${roomCode} — player connected`:`Connection opened; waiting for host handshake…`,true);
     });
     conn.on('data',msg=>handlePeerMessage(conn,msg));
     conn.on('close',()=>{clearTimeout(connectionTimer);connections.delete(conn.peer);removeRemote(conn.peer);updatePlayers();if(connections.size===0&&!hostMode)status('Disconnected. Check that the host is still online.');});
